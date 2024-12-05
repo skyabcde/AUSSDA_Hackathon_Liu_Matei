@@ -1,0 +1,544 @@
+---
+title: "The Impact of Far-Right Voting and Education on COVID-19 Vaccination Attitudes: A Multilevel Analysis"
+subtitle: "AUSSDA hackathon -- Code & Visualisation"
+author: "Ionel Matei & Sky Liu"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+runtime: shiny
+knitr:
+  opts_chunk:
+    echo: true
+    collapse: true
+    out.width: "\\textwidth"
+    attr.output: 'style="max-height: 200px"'
+    tidy: 'styler'
+---
+
+
+
+### Section 1: Research question
+
+We aim to investigate whether voting for far-right parties and years of education influence individuals' vaccination behaviors and attitudes during the COVID-19 pandemic. In this context, far-right parties have been manually selected by authors prior to the analysis. They are defined as those embracing right-wing populism and potentially extremist rhetoric, characterized by nationalism, anti-immigration sentiment, anti-establishment narratives, and intolerance toward minorities. These parties are distinguished from mainstream right-wing groups by their exclusionary ideologies and polarizing challenges to liberal democratic norms.  
+
+Our data, sourced from the 10th round of the European Social Survey (ESS) face to face countries in 2020.
+
+
+
+```{r setup r, warning=FALSE, message=FALSE}
+
+options(repos = c(CRAN = "https://cran.r-project.org"))
+
+p_needed <- 
+  c("ggplot2", "viridis", "MASS", "optimx", "scales", "foreign", 
+    "separationplot", "patchwork", "stargazer", "here", "dplyr", "formatR", "haven", "purrr", 
+    "shiny", "shinythemes", "tidyverse", "rsconnect", "bs4Dash", "shinycssloaders", "sandwich", "lmtest", "shinycssloaders", "bs4Dash")
+
+# Check installed packages and install any missing ones
+packages <- rownames(installed.packages())
+p_to_install <- p_needed[!(p_needed %in% packages)]
+if (length(p_to_install) > 0) {
+  install.packages(p_to_install)
+}
+
+# Load the required packages
+sapply(p_needed, require, character.only = TRUE)
+
+# Set theme for ggplot2
+theme_set(theme_classic() + 
+  theme(
+    plot.background = element_blank(),
+    plot.title.position = "plot",  
+    legend.position = "bottom" 
+  ))
+
+set.seed(1485)
+
+```
+
+
+
+### Section 2: Data cleaning
+
+We conducted a thorough data cleaning process. First, we manually identified far-right parties in each country (definition see Section 1) and created a binary variable indicating whether respondents voted for such parties (coded as 1) or for other parties (coded as 0). 
+
+
+
+```{r Data cleaning 1, warning=FALSE}
+data <- read.spss(paste0("ESS10-subset/ESS10-subset.sav"), use.value.labels = F, use.missings = F, to.data.frame = T) %>% 
+  as_tibble 
+
+# List of valid country codes
+valid_countries <- c("BE", "BG", "CH", "CZ", "EE", "FR", "FI", "GB", "GR", "HR", "HU", "IT", "LT", "ME", "MK", "NL", "NO", "PT", "SI", "SK")
+
+# Filter the data to retain only rows with valid country codes
+data <- data[data$cntry %in% valid_countries, ]
+
+
+# List of far-right values for each country
+far_right_parties <- list(
+  prtvtebe = c(6),                     # Belgium
+  prtvtebg = c(8, 9),                  # Bulgaria
+  prtvthch = c(1, 9, 10),              # Switzerland
+  prtvtbhr = c(3),                     # Croatia
+  prtvtecz = c(8),                     # Czechia
+  prtvthee = c(6),                     # Estonia
+  prtvtefr = c(11),                    # France
+  prtvtdgr = c(7),                     # Greece
+  prtvtghu = c(4),                     # Hungary
+  prtvtdit = c(3, 5, 10),              # Italy
+  prtvthnl = c(3, 13),                 # Netherlands
+  prtvtdno = c(8),                     # Norway
+  prtvtdpt = c(4),                     # Portugal
+  prtvtdsi = c(8, 11),                 # Slovenia
+  prtvtesk = c(4),                     # Slovakia
+  prtvtdgb = c(7, 8)                   # United Kingdom
+)
+
+# Initialize a new column for the unified far-right dummy with 0
+data$far_right_dummy <- 0
+
+# Iterate through the list and mark the dummy as 1 if a far-right party is matched
+for (party_var in names(far_right_parties)) {
+  if (party_var %in% names(data)) {
+    data$far_right_dummy <- ifelse(
+      data[[party_var]] %in% far_right_parties[[party_var]],
+      1,
+      data$far_right_dummy
+    )
+  }
+}
+
+
+```
+
+
+
+Additionally, invalid responses such as "Refusal," "Don’t know," and "No answer" in subjective questions were excluded. We categorized participants’ vaccination intentions using the ESS survey questions "getavc19" and "getnvc19." Responses were grouped into three categories:
+
+- **Yes, Vaccinated or Willing**: Included those who selected "Yes, I will," "Yes, I already have," or "Yes, I would."
+- **No/Refused to answer**: Included those who selected "No," "Refusal," or "No, I would not."
+- **Undecided**: Included responses such as "Not applicable," "Don’t know," or "No answer."
+
+
+
+```{r Data cleaning 2, warning=FALSE}
+
+# Create cleaned data by merging all components
+data_clean <- data %>%
+  
+  # Handle missing values and recode variables
+  mutate(
+    polintr = ifelse(polintr %in% c(7, 8, 9), NA, polintr),  # Replace invalid responses with NA; How interested in politics.
+    lrscale = ifelse(lrscale %in% c(77, 88, 99), NA, lrscale),  # Replace invalid responses with NA; Placement on left right scale. 
+    eduyrs = ifelse(eduyrs %in% c(77, 88, 99), NA, eduyrs),    # Replace invalid responses with NA; Years of education. 
+    female = ifelse(gndr == 2, 1, 0)  # Recode 'gndr' to 'female' (1 = Female, 0 = Male)
+  ) %>%
+  
+  # Filter out rows where any important variable is NA
+  filter(
+    !is.na(polintr) &
+    !is.na(getavc19) &
+    !is.na(agea) &
+    !is.na(lrscale) &
+    !is.na(eduyrs)
+  ) %>%
+  
+  # Create the 'vaccine_status' variable
+  mutate(
+    vaccine_status = case_when(
+      # Yes, vaccinated or willing
+      getavc19 %in% c(1, 2) | getnvc19 %in% c(1) ~ "Yes, vaccinated or willing",
+
+      # No / Refused to answer
+      getavc19 %in% c(3, 7) | getnvc19 %in% c(2, 7) ~ "No/Refused to answer",
+
+      # Undecided
+      getavc19 %in% c(8, 9) | getnvc19 %in% c(8, 9) ~ "Undecided",
+
+      # Default case (if no match, return NA)
+      TRUE ~ NA_character_
+    )
+  )
+
+
+```
+
+
+
+### Section 3: Explorotary data visualization
+
+We began by visualizing the relationship between vaccination status and voting for far-right parties, controlling for individual political interest, years of education, and country of residence. This initial visualization provided insights into potential patterns and correlations, laying the groundwork for more complex analysis.
+
+
+
+```{r Raw data visulization, warning=FALSE, fig.width=12, fig.height=10, fig.align='center'}
+data_vi <- data_clean |>
+  dplyr::select(polintr, lrscale, eduyrs, gndr, cntry, agea, vaccine_status, far_right_dummy) 
+
+colours <- c(
+  'Yes, vaccinated or willing'= "#A26E7C",
+  'No/Refused to answer' = "#6681FE",
+  'Undecided' = "#1EC98D"
+) 
+
+ggplot(data_vi) +
+  aes(x = as.factor(polintr), y = eduyrs) +
+  geom_point(aes(color = vaccine_status) ,
+                 alpha = 0.6, 
+                 size = 1.5) +
+  facet_grid(rows = vars(far_right_dummy),
+             cols = vars(cntry),
+             scales = "free_y",
+             space = "free_y",
+             labeller = labeller(far_right_dummy = c(
+                                 "1" = "Vote for far-right party",
+                                 "0" = "Other"))) +
+  scale_color_manual(values = colours,
+                     name = "Vaccine Status") +
+  labs(x = "How interested are you in politics", 
+       y = "Years of education received",
+       title = "Vaccination status and voting for far-right parties controlling for 
+       individual political interest, years of education, and country of residence",
+       caption = "Data: ESS (European Social Survey), 10th round") +
+  theme_minimal() +
+  theme(
+    plot.title.position = "plot", # left-align title 
+    plot.caption.position = "plot", # right-align caption
+    legend.position = "top" , # place legend above plot
+    plot.title = element_text(face = "bold", size = rel(1.4)) , # larger, bold title
+     # monospaced font for axes
+    axis.title.x = element_text( #left-aligned, grey x axis label
+    hjust = 0,  margin = margin(t = 12)
+    ) ,
+    legend.text = element_text(size = rel(1)), # larger legend labels
+    strip.text = element_text(face = "bold", size = rel(1.15)) , # larger, bold facet labels
+    panel.grid.minor = element_blank(),
+     plot.background = element_rect(fill = "white", color = "white"),  # White background for plot
+    panel.background = element_rect(fill = "white", color = "white"), # White background for panel
+    panel.border = element_blank() 
+  ) 
+
+```
+
+The raw data visualization indicates that all French (FR) participants selected "Undecided" for their vaccine status, though the reasons for this remain unclear, and their voting choices appeared unrelated. In contrast, participants from Belgium (BG) and Slovenia (SI) exhibited more diverse attitudes toward vaccination, particularly among those voting for non-far-right parties. Participants from Italy (IT), the United Kingdom (GB), and Portugal (PT) demonstrated a more consistent inclination to accept vaccination. Voters aligned with far-right parties showed no discernible trend or consistent stance on vaccination attitudes.
+
+
+
+### Section 4: Inferential analysis
+
+We developed a multilevel logistic regression model to examine the the probability of voting for far-right voting on vaccination status, accounting for predictors such as political interest, gender, and years of education. Since not all countries in the survey have identifiable far-right parties, we excluded those without clear far-right representation ("FI", "LT", "ME", "MK"). Additionally, we excluded France from the analysis, as all French respondents were categorized as "Undecided" regarding vaccination—a result we deemed statistically implausible and potentially indicative of data collection issues. Consequently, we removed five countries from the dataset to ensure robust data modeling. We also included survey weights in our model by specifying `weights = data_model$pspwght`. These weights were used to adjust for the unequal probability of selection that often arises in survey data. By using these weights, we ensured that our model's predictions would be representative of the broader population, taking into account different sampling probabilities.
+
+
+
+```{r Analysis modelling, warning=FALSE}
+# Fit the logistic regression model excluding the 'agea' variable
+model_countries <- c("BE", "BG", "CH", "CZ", "EE", "GB", "GR", "HR", 
+                     "HU", "IT", "NL", "NO", "PT", "SI", "SK")
+
+data_model <- data_clean[data_clean$cntry %in% model_countries, ] 
+data_model$far_right_dummy <- as.factor(data_model$far_right_dummy)
+data_model$vaccine_status <- as.factor(data_model$vaccine_status)
+
+model <- glm(far_right_dummy ~ vaccine_status + polintr + female + eduyrs, family = binomial(link = "logit"), data = data_model, weights = data_model$pspwght)
+
+# Calculate robust standard errors using the sandwich package
+robust_se <- sqrt(diag(vcovHC(model, type = "HC0")))  
+
+```
+
+
+
+### Section 5: Simulation and visualisation 
+
+To gain a deeper understanding, we carried out Monte Carlo simulations across all possible scenarios, given that the data on far-right voting could be limited, particularly for certain vaccination stances. By simulating the model 100,000 times, we ensured that our findings were not simply due to random variation in the data but represented consistent patterns. The simulations allow us to observe how changes in the controls (like political interest, gender, and education level) affect the probability of voting for a far-right party for individuals belonging to each of the three groups based on their stance toward the COVID-19 vaccine: "Undecided," "Yes, vaccinated or willing," and "No, refused."
+ 
+We chose to run the simulations inside the server environment instead of globally to allow for dynamic, user-driven exploration. This way, the simulations are generated in response to user inputs (e.g., country, gender, political interest), enabling real-time updates of the results. Running simulations within the server ensures optimal resource usage, as calculations are performed only when needed, avoiding unnecessary computations. It also allows for personalized predictions based on user-defined scenarios, making the tool interactive and flexible.
+ 
+The plots we generated as a result of these simulations stand for the average predicted probabilities, including confidence intervals that help visualize the uncertainty around these estimates. By doing so, we aimed to optimally represent the impact of each control variable on voting behavior in a way that reveals any potential differences among the three vaccine stance categories.
+
+
+
+```{r Simulation visualization 1, warning = FALSE}
+# UI definition
+ui <- dashboardPage(
+  dark = FALSE,
+  help = NULL, # Enable dark theme
+  dashboardHeader(
+    title = "Matei & Liu's Project",
+    display = NULL  # Hide the burger and the question mark
+  ),
+  
+  dashboardSidebar(
+    sidebarMenu(compact = FALSE,
+      # Shorter and clearer title for the sidebar menu
+      menuItem("Select Parameters", tabName = "country_plot", icon = NULL)
+    ),
+    
+    # Country Selection Input without duplication
+    selectInput("cntry", tagList(icon("globe"), "Select Country:"),
+                choices = c("All Countries", "Belgium" = "BE", "Bulgaria" = "BG", "Switzerland" = "CH",
+                            "Czech Republic" = "CZ", "Estonia" = "EE", "United Kingdom" = "GB",
+                            "Greece" = "GR", "Croatia" = "HR", "Hungary" = "HU", "Italy" = "IT",
+                            "Netherlands" = "NL", "Norway" = "NO", "Portugal" = "PT", "Slovenia" = "SI",
+                            "Slovakia" = "SK"),
+                selected = "All Countries"),
+    
+    # Gender selection
+    selectInput("gndr", tagList(icon("venus-mars"), "Gender:"),
+                choices = c("Male" = 0, "Female" = 1),
+                selected = 0),
+    
+    # Dynamic sliders for Political Interest and Years of Education
+    uiOutput("polintr_slider"),
+    uiOutput("eduyrs_slider"),
+    
+    # Plot selection with clear configuration
+    selectInput("plot_type", tagList(icon("chart-bar"), "Select Plot Type:"),
+                choices = c("Predicted Probabilities" = "prob", "Bar Plot" = "bar", "Density Plot" = "other", "Lollipop Plot" = "lollipop", "Box Plot" = "box", "Violin Plot" = "violin")),
+    
+    # Reset button for all inputs
+    actionButton("reset_inputs", "Reset All Inputs", icon = icon("redo"), class = "btn-danger")
+  ),
+  
+  dashboardBody(
+    # Body with a dark theme
+    tags$head(
+      tags$style(HTML(
+        ".shiny-input-container, .box {
+          transition: transform 0.3s ease-in-out;  /* Only animate transform to prevent darkening */
+        }
+        .box {
+          background-color: #343a40 !important;  /* Set a stable background color */
+          color: #f8f9fa;  /* Set text color to maintain visibility */
+          border: none !important;  /* Remove border to prevent border color transitions */
+          box-shadow: none !important;  /* Remove box-shadow to avoid darkening during animations */
+        }
+        .fadeIn {
+          animation: fadeIn 1s ease-in-out;
+        }
+        @keyframes fadeIn {
+          from { opacity: 1; }
+          to { opacity: 1; }  /* Keep opacity constant to avoid any fade effect causing darkening */
+        }
+        /* Style the slider play buttons */
+        .slider-animate-button {
+          background-color: #ff0000 !important;  /* Make the play button red */
+          border-color: #ff0000 !important;      /* Match border color with button color */
+          color: #ffffff !important;             /* Make the play button text white for contrast */
+        }"
+      ))
+    ),
+    
+    tabItems(
+      tabItem(tabName = "country_plot",
+              fluidRow(
+                # Box to hold the dynamic plot
+                box(width = 12, title = "The Predicted Probability of Voting for Far-right Party given the Vaccination Status of Country's Respondents",
+                    status = "danger", solidHeader = TRUE,
+                    div(style = "animation: fadeIn 1s;", plotOutput("dynamicPlot", height = "calc(70vh)", width = "100%")),  # Responsive plot with 16:9 ratio
+                    helpText("Data: ESS (European Social Survey), 10th Round")
+                )
+              )
+      )
+    )
+  )
+)
+
+# Server logic
+server <- function(input, output, session) {
+  # Toggle sidebar visibility using the burger button
+  observeEvent(input$sidebarToggle, {
+    js$toggleSidebar()  # Call the JavaScript function to toggle sidebar
+  })
+  
+  # Reset button observer
+  observeEvent(input$reset_inputs, {
+    updateSelectInput(session, "cntry", selected = "All Countries")
+    updateSelectInput(session, "gndr", selected = 0)
+    updateSliderInput(session, "polintr", value = mean(reactive_data()$polintr, na.rm = TRUE))
+    updateSliderInput(session, "eduyrs", value = mean(reactive_data()$eduyrs, na.rm = TRUE))
+    updateSelectInput(session, "plot_type", selected = "prob")
+  })
+  
+  # Reactive dataset based on selected country
+  reactive_data <- reactive({
+    if (input$cntry == "All Countries") {
+      data_clean  # Replace with your data
+    } else {
+      data_clean %>% filter(cntry == input$cntry)  # Assuming cntry is the country variable
+    }
+  })
+  
+  # Dynamic sliders for user input
+  output$polintr_slider <- renderUI({
+    sliderInput("polintr", tagList(icon("poll"), "Political Interest:"),
+                min = min(reactive_data()$polintr, na.rm = TRUE),
+                max = max(reactive_data()$polintr, na.rm = TRUE),
+                value = mean(reactive_data()$polintr, na.rm = TRUE),
+                step = 1, animate = animationOptions(interval = 300, loop = TRUE), ticks = FALSE)
+  })
+  
+  output$eduyrs_slider <- renderUI({
+    sliderInput("eduyrs", tagList(icon("graduation-cap"), "Years of Education:"),
+                min = min(reactive_data()$eduyrs, na.rm = TRUE),
+                max = max(reactive_data()$eduyrs, na.rm = TRUE),
+                value = mean(reactive_data()$eduyrs, na.rm = TRUE),
+                step = 1, animate = animationOptions(interval = 300, loop = TRUE), ticks = FALSE)
+  })
+  
+  # Reactive Plot based on selected plot type
+  output$dynamicPlot <- renderPlot({
+    
+    # Extract coefficients from the model (example model)
+    coef_estimates <- coef(model)  # Assuming 'model' is your model object
+    vcov_matrix <- vcovHC(model, type = "HC3")  # Use robust covariance matrix
+    
+    # Monte Carlo simulations (100,000 draws) for uncertainty
+    n_sim <- 100000
+    simulated_coefs <- mvrnorm(n_sim, mu = coef_estimates, Sigma = vcov_matrix)
+    
+    # Prediction data
+    prediction_data <- data.frame(
+      vaccine_status = c("Yes, vaccinated or willing", "No/Refused to answer", "Undecided"),
+      polintr = as.numeric(input$polintr),
+      female = as.numeric(input$gndr),
+      eduyrs = as.numeric(input$eduyrs)
+    )
+    
+    # Simulate probabilities
+    simulations <- do.call(rbind, lapply(1:nrow(prediction_data), function(i) {
+      X <- c(
+        1,  # Intercept
+        as.numeric(prediction_data$vaccine_status[i] == "Undecided"),
+        as.numeric(prediction_data$vaccine_status[i] == "Yes, vaccinated or willing"),
+        prediction_data$polintr[i],
+        prediction_data$female[i],
+        prediction_data$eduyrs[i]
+      )
+      probs <- 1 / (1 + exp(-simulated_coefs %*% X))
+      data.frame(vaccine_status = prediction_data$vaccine_status[i], prob = probs)
+    }))
+    
+    # Summarize simulations
+    simulation_summary <- simulations %>%
+      group_by(vaccine_status) %>%
+      summarise(
+        mean_prob = mean(prob),
+        lower_ci = quantile(prob, 0.025),
+        upper_ci = quantile(prob, 0.975)
+      )
+    
+    # Plot selection based on input
+    plot_width <- session$clientData$output_dynamicPlot_width  # Get plot width
+    plot_height <- plot_width * 0.625  # 16:10 aspect ratio 
+    
+    # Set scaling factor based on plot size
+    scaling_factor <- max(10, plot_width / 600)  # Adjust scaling factor based on width
+    
+    # Color Universal Design (CUD) color palette for colorblind-friendly colors
+    cud_colors <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00")
+    
+    # Plot generation
+    if (input$plot_type == "prob") {
+      ggplot(simulation_summary, aes(x = vaccine_status, y = mean_prob * 100, fill = vaccine_status)) +
+        geom_point(aes(color = vaccine_status), size = 5) +  # Adding color for points
+        scale_color_manual(values = cud_colors) +  # Apply CUD color palette
+        geom_errorbar(aes(ymin = lower_ci * 100, ymax = upper_ci * 100), width = 0.2, color = "#888888") +
+        labs(x = "Vaccination Status", y = "Predicted Probability (%)") +  # Removed 'fill' in the legend
+        scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+        theme_minimal() +
+        theme(
+          axis.text = element_text(size = 1.5 * scaling_factor),
+          axis.title = element_text(size = 1.7 * scaling_factor, face = 'bold', margin = margin(t = 10, r = 10, b = 10, l = 10)),
+          plot.title = element_text(size = 2 * scaling_factor),
+          legend.position = "none",  # Removes the legend completely
+          legend.text = element_text(size = 1.2 * scaling_factor, face = 'bold'),
+          legend.title = element_text(size = 1.7 * scaling_factor, face = 'bold')
+        )
+      
+    } else if (input$plot_type == "bar") {
+      ggplot(simulation_summary, aes(x = vaccine_status, y = mean_prob * 100, fill = vaccine_status)) +
+        geom_bar(stat = "identity") +
+        geom_errorbar(aes(ymin = lower_ci * 100, ymax = upper_ci * 100), width = 0.2, color = "#888888", position = position_dodge(0.9)) +
+        scale_fill_manual(values = cud_colors) +  # Apply CUD color palette to bars
+        labs(x = "Vaccination Status", y = "Predicted Probability (%)", fill = "Vaccination Status") +
+        scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+        theme_minimal() +
+        theme(
+          axis.text = element_text(size = 1.5 * scaling_factor),
+          axis.title = element_text(size = 1.7 * scaling_factor, face = 'bold', margin = margin(t = 10, r = 10, b = 10, l = 10)),
+          plot.title = element_text(size = 2 * scaling_factor),
+          legend.text = element_text(size = 1.2 * scaling_factor, face = 'bold'),
+          legend.title = element_text(size = 1.7 * scaling_factor, face = 'bold')
+        ) +
+        guides(fill = guide_legend(title = "COVID-19 Vaccination Status"))
+      
+    } else if (input$plot_type == "lollipop") {
+      ggplot(simulation_summary, aes(x = vaccine_status, y = mean_prob * 100)) +
+        geom_segment(aes(x = vaccine_status, xend = vaccine_status, y = 0, yend = mean_prob * 100), color = "#888888", size = 1) +
+        geom_point(aes(color = vaccine_status), size = 5) +  # Adding color for points
+        scale_color_manual(values = cud_colors) +  # Apply CUD color palette
+        labs(x = "Vaccination Status", y = "Predicted Probability (%)") +  # Removed 'fill' in the legend
+        scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+        theme_minimal() +
+        theme(
+          axis.text = element_text(size = 1.5 * scaling_factor),
+          axis.title = element_text(size = 1.7 * scaling_factor, face = 'bold', margin = margin(t = 10, r = 10, b = 10, l = 10)),
+          plot.title = element_text(size = 2 * scaling_factor),
+          legend.position = "none",  # Removes the legend completely
+          legend.text = element_text(size = 1.2 * scaling_factor, face = 'bold'),
+          legend.title = element_text(size = 1.7 * scaling_factor, face = 'bold')
+        )
+      
+    } else if (input$plot_type == "box") {
+      ggplot(simulations, aes(x = vaccine_status, y = prob * 100, fill = vaccine_status)) +
+        geom_boxplot() +
+        scale_fill_manual(values = cud_colors) +
+        labs(x = "Vaccination Status", y = "Predicted Probability (%)", fill = "Vaccination Status") +
+        theme_minimal() +
+        theme(
+          axis.text = element_text(size = 1.5 * scaling_factor),
+          axis.title = element_text(size = 1.7 * scaling_factor, face = 'bold', margin = margin(t = 10, r = 10, b = 10, l = 10)),
+          plot.title = element_text(size = 2 * scaling_factor),
+          legend.text = element_text(size = 1.2 * scaling_factor, face = 'bold'),
+          legend.title = element_text(size = 1.7 * scaling_factor, face = 'bold')
+        )
+      
+    } else if (input$plot_type == "violin") {
+      ggplot(simulations, aes(x = vaccine_status, y = prob * 100, fill = vaccine_status)) +
+        geom_violin(trim = FALSE) +
+        scale_fill_manual(values = cud_colors) +
+        labs(x = "Vaccination Status", y = "Predicted Probability (%)", fill = "Vaccination Status") +
+        theme_minimal() +
+        theme(
+          axis.text = element_text(size = 1.5 * scaling_factor),
+          axis.title = element_text(size = 1.7 * scaling_factor, face = 'bold', margin = margin(t = 10, r = 10, b = 10, l = 10)),
+          plot.title = element_text(size = 2 * scaling_factor),
+          legend.text = element_text(size = 1.2 * scaling_factor, face = 'bold'),
+          legend.title = element_text(size = 1.7 * scaling_factor, face = 'bold')
+        )
+      
+    } else {
+      ggplot(simulations, aes(x = prob, fill = vaccine_status)) +
+        geom_density(alpha = 0.4) +
+        scale_fill_manual(values = cud_colors) +  # Apply CUD color palette to density plot
+        labs(x = "Predicted Probability", y = "Density", fill = "Vaccination Status") +
+        theme_minimal() +
+        theme(
+          axis.text = element_text(size = 1.5 * scaling_factor),
+          axis.title = element_text(size = 1.7 * scaling_factor, face = 'bold', margin = margin(t = 10, r = 10, b = 10, l = 10)),
+          plot.title = element_text(size = 2 * scaling_factor),
+          legend.text = element_text(size = 1.2 * scaling_factor, face = 'bold'),
+          legend.title = element_text(size = 1.7 * scaling_factor, face = 'bold')
+        ) +
+        guides(fill = guide_legend(title = "COVID-19 Vaccination Status"))
+    }
+  })
+}
+
+# Run the Shiny app
+shinyApp(ui = ui, server = server, options = list(launch.browser = TRUE, width = 1200, height = 800))
+
+```
