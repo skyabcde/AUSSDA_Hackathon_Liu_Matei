@@ -3,3 +3,5 @@
 We aim to investigate whether voting for far-right parties and years of education influence individuals' vaccination behaviors and attitudes during the COVID-19 pandemic. In this context, far-right parties have been manually selected by authors prior to the analysis. They are defined as those embracing right-wing populism and potentially extremist rhetoric, characterized by nationalism, anti-immigration sentiment, anti-establishment narratives, and intolerance toward minorities. These parties are distinguished from mainstream right-wing groups by their exclusionary ideologies and polarizing challenges to liberal democratic norms. Our data, sourced from the 10th round of the European Social Survey [(ESS)](https://www.europeansocialsurvey.org) face to face countries in 2020.
 
 You can run either of the .Rmd file for the end results configuration. The difference between Project_Code&Visualisation.Rmd and Project_VisualisationOnly.Rmd is whether the code is included in the final .html documenet. 
+
+Thank you!
